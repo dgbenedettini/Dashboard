@@ -34,6 +34,44 @@ ARCHIVOS = {
 
 CAMPANA_DEFAULT = "2526"
 
+# Google Sheet del cotizador (para ingredientes activos / descripciones)
+COTIZADOR_SHEET_ID = "1sBGkGzZuuBtkMuzo0h1t6IbE7EcSil1X"
+
+
+def download_sheet_as_xlsx(sheet_id):
+    """Descarga un Google Sheet publico como .xlsx."""
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=xlsx"
+    r = requests.get(url, timeout=90)
+    r.raise_for_status()
+    content = r.content
+    if content[:2] != b'PK':
+        raise ValueError(f"El sheet {sheet_id} no descargo un Excel valido.")
+    print(f"  Cotizador descargado: {len(content):,} bytes")
+    return BytesIO(content)
+
+
+def build_descripciones():
+    """
+    Devuelve un dict { PRODUCTO_UPPER: descripcion } desde la hoja COTIZADOR.
+    Encabezados en fila 7: [2]=Producto [3]=Descripcion (0-based openpyxl).
+    """
+    try:
+        f = download_sheet_as_xlsx(COTIZADOR_SHEET_ID)
+        wb = openpyxl.load_workbook(f, read_only=True, data_only=True)
+        ws = wb['COTIZADOR'] if 'COTIZADOR' in wb.sheetnames else wb[wb.sheetnames[0]]
+        desc = {}
+        for row in ws.iter_rows(min_row=8, values_only=True):
+            prod = row[2] if len(row) > 2 else None
+            d = row[3] if len(row) > 3 else None
+            if prod and str(prod).strip():
+                desc[str(prod).strip().upper()] = (str(d).strip() if d else '')
+        wb.close()
+        print(f"  Descripciones cargadas: {len(desc)} productos")
+        return desc
+    except Exception as ex:
+        print(f"  ERROR cargando descripciones: {ex}")
+        return {}
+
 
 def download_from_gdrive(file_id):
     """Descarga el archivo .xlsm original desde Google Drive."""
@@ -146,9 +184,13 @@ def update_html(app_data):
 
 
 def main():
+    print("\nCargando descripciones (ingredientes activos) del cotizador...")
+    descripciones = build_descripciones()
+
     app_data = {
         "generado": datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC'),
         "default": CAMPANA_DEFAULT,
+        "descripciones": descripciones,
         "campanas": {},
     }
     for camp, ids in ARCHIVOS.items():
