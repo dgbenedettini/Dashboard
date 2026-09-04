@@ -1,7 +1,12 @@
 name: Actualizar Dashboard
 on:
   schedule:
-    - cron: '0 10 * * 1-6'   # Lunes a Sabado a las 10am UTC (7am Paraguay)
+    # 3 actualizaciones diarias (lunes a sabado), hora de Paraguay (GMT-3).
+    # Uso minuto :20 en vez de :00 porque GitHub retrasa mucho los cron en punto
+    # (alta carga). Aun asi puede haber algunos minutos de demora, es normal.
+    - cron: '20 10 * * 1-6'   # 7:20 Paraguay (manana)
+    - cron: '20 15 * * 1-6'   # 12:20 Paraguay (mediodia)
+    - cron: '20 21 * * 1-6'   # 18:20 Paraguay (tarde)
   workflow_dispatch:          # Permite correrlo manualmente desde GitHub
 jobs:
   actualizar:
