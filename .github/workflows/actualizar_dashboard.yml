@@ -1,31 +1,113 @@
 name: Actualizar Dashboard
 on:
   schedule:
-    # 3 actualizaciones diarias (lunes a sabado), hora de Paraguay (GMT-3).
-    # Uso minuto :20 en vez de :00 porque GitHub retrasa mucho los cron en punto
-    # (alta carga). Aun asi puede haber algunos minutos de demora, es normal.
-    - cron: '20 10 * * 1-6'   # 7:20 Paraguay (manana)
-    - cron: '20 15 * * 1-6'   # 12:20 Paraguay (mediodia)
-    - cron: '20 21 * * 1-6'   # 18:20 Paraguay (tarde)
-  workflow_dispatch:          # Permite correrlo manualmente desde GitHub
+    # GitHub Actions NO respeta la hora exacta del cron (lo retrasa o saltea,
+    # sobre todo a la manana). Por eso NO pedimos 3 horarios exactos: pedimos
+    # que INTENTE cada 30 minutos (lun-sab). Un paso "gate" mas abajo decide si
+    # de verdad corresponde actualizar segun la franja horaria de Paraguay, y
+    # actualiza UNA SOLA VEZ por franja. Asi, aunque GitHub saltee algunas
+    # corridas, alguna ventana cercana a las 7/12/18h siempre pega.
+    - cron: '*/30 * * * 1-6'
+  workflow_dispatch:          # Permite correrlo manualmente desde GitHub (siempre actualiza)
+
+# Evita que corran dos a la vez
+concurrency:
+  group: actualizar-dashboard
+  cancel-in-progress: false
+
 jobs:
   actualizar:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repositorio
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # historial completo para revisar commits de hoy
+
+      # ── GATE: decide si corresponde actualizar esta franja ──
+      # Franjas (hora Paraguay, UTC-3). Ventana amplia para absorber retrasos:
+      #   Manana:   07:00 a 11:59  (objetivo 7:00; ventana amplia por retrasos)
+      #   Mediodia: 12:00 a 14:59  (objetivo 12:00)
+      #   Tarde:    18:00 a 20:59  (objetivo 18:00)
+      # Si el disparo es manual (workflow_dispatch), siempre actualiza.
+      - name: Decidir si corresponde actualizar
+        id: gate
+        run: |
+          set -e
+          # Hora actual en Paraguay
+          HORA_PY=$(TZ="America/Asuncion" date '+%H')
+          FECHA_PY=$(TZ="America/Asuncion" date '+%Y-%m-%d')
+          echo "Hora Paraguay: ${HORA_PY}h del ${FECHA_PY}"
+
+          # Disparo manual: actualizar siempre
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Disparo manual -> actualizar."
+            echo "run=si" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Determinar franja actual segun la hora PY
+          FRANJA=""
+          if [ "$HORA_PY" -ge 7 ]  && [ "$HORA_PY" -le 11 ]; then FRANJA="manana"; fi
+          if [ "$HORA_PY" -ge 12 ] && [ "$HORA_PY" -le 14 ]; then FRANJA="mediodia"; fi
+          if [ "$HORA_PY" -ge 18 ] && [ "$HORA_PY" -le 20 ]; then FRANJA="tarde"; fi
+
+          if [ -z "$FRANJA" ]; then
+            echo "Fuera de franja horaria -> no actualizar."
+            echo "run=no" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Franja actual: $FRANJA"
+
+          # Ver si YA hubo un commit automatico hoy dentro de esta franja.
+          # Revisamos los commits del bot de hoy y su hora PY.
+          YA_HECHO="no"
+          # Rango de horas PY de cada franja
+          case "$FRANJA" in
+            manana)   H1=7;  H2=11 ;;
+            mediodia) H1=12; H2=14 ;;
+            tarde)    H1=18; H2=20 ;;
+          esac
+          # Recorrer commits de las ultimas 24h del bot
+          while read -r chash cdate; do
+            [ -z "$chash" ] && continue
+            # cdate viene en ISO con zona; convertir a hora PY
+            CPY=$(TZ="America/Asuncion" date -d "$cdate" '+%Y-%m-%d %H' 2>/dev/null) || continue
+            CFECHA=$(echo "$CPY" | cut -d' ' -f1)
+            CHORA=$(echo "$CPY" | cut -d' ' -f2)
+            if [ "$CFECHA" = "$FECHA_PY" ] && [ "$CHORA" -ge "$H1" ] && [ "$CHORA" -le "$H2" ]; then
+              YA_HECHO="si"
+              echo "Ya hubo actualizacion hoy en la franja $FRANJA (commit $chash a las ${CHORA}h PY)."
+              break
+            fi
+          done < <(git log --since="26 hours ago" --author="github-actions" --format='%H %cI')
+
+          if [ "$YA_HECHO" = "si" ]; then
+            echo "run=no" >> "$GITHUB_OUTPUT"
+          else
+            echo "Corresponde actualizar la franja $FRANJA."
+            echo "run=si" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Setup Python
+        if: steps.gate.outputs.run == 'si'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
       - name: Instalar dependencias
+        if: steps.gate.outputs.run == 'si'
         run: pip install requests openpyxl
+
       - name: Regenerar dashboard
+        if: steps.gate.outputs.run == 'si'
         run: python regenerar_dashboard.py
+
       - name: Subir index.html actualizado
+        if: steps.gate.outputs.run == 'si'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add index.html
-          git diff --cached --quiet || git commit -m "Actualizacion automatica $(date '+%d/%m/%Y %H:%M')"
+          git diff --cached --quiet || git commit -m "Actualizacion automatica $(TZ='America/Asuncion' date '+%d/%m/%Y %H:%M')"
           git push
