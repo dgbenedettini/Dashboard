@@ -37,6 +37,61 @@ CAMPANA_DEFAULT = "2526"
 # Google Sheet del cotizador (para ingredientes activos / descripciones)
 COTIZADOR_SHEET_ID = "1sBGkGzZuuBtkMuzo0h1t6IbE7EcSil1X"
 
+# ─── Descarga desde OneDrive (con respaldo en Google Drive) ─────────
+# Cada Excel tiene un vínculo "Cualquier persona con el vínculo puede ver" guardado
+# como secreto de GitHub (variable de entorno). Si OneDrive falla, se usa Google Drive
+# como antes y queda un aviso en GitHub Actions.
+import base64 as _b64
+import time as _time
+
+_OD_HEADERS = {'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36'}
+
+
+def _onedrive_bytes(share_url):
+    errores = []
+    for intento in (1, 2):
+        # Método A: vínculo + download=1
+        try:
+            sep = '&' if '?' in share_url else '?'
+            r = requests.get(share_url + sep + 'download=1', headers=_OD_HEADERS, timeout=90, allow_redirects=True)
+            if r.status_code == 200 and r.content[:2] == b'PK':
+                return r.content, 'vinculo directo'
+            errores.append(f'vinculo HTTP {r.status_code}')
+        except Exception as e:
+            errores.append(f'vinculo: {e}')
+        # Método B: token anónimo de OneDrive personal
+        try:
+            enc = 'u!' + _b64.urlsafe_b64encode(share_url.encode()).decode().rstrip('=')
+            tok = requests.post('https://api-badgerp.svc.ms/v1.0/token',
+                                json={'appId': '5cbed6ac-a083-4e14-b191-b4ba07653de2'},
+                                headers=_OD_HEADERS, timeout=30).json()['token']
+            h = dict(_OD_HEADERS, Authorization='Badger ' + tok, Prefer='autoredeem')
+            r = requests.get(f'https://my.microsoftpersonalcontent.com/_api/v2.0/shares/{enc}/driveitem/content',
+                             headers=h, timeout=90, allow_redirects=True)
+            if r.status_code == 200 and r.content[:2] == b'PK':
+                return r.content, 'token anonimo'
+            errores.append(f'token HTTP {r.status_code}')
+        except Exception as e:
+            errores.append(f'token: {e}')
+        if intento == 1:
+            _time.sleep(10)
+    raise RuntimeError('; '.join(errores))
+
+
+def descargar_excel(nombre, secreto, respaldo):
+    """Devuelve el Excel como BytesIO: primero OneDrive; si no se puede, respaldo() (Google Drive)."""
+    url = os.environ.get(secreto, '').strip()
+    if url:
+        try:
+            data, metodo = _onedrive_bytes(url)
+            print(f"  {nombre}: OneDrive ({metodo}), {len(data):,} bytes")
+            return BytesIO(data)
+        except Exception as e:
+            print(f"::warning::{nombre}: no se pudo bajar de OneDrive ({e}). Se usa Google Drive: los datos pueden estar desactualizados.")
+    else:
+        print(f"::warning::{nombre}: falta el secreto {secreto}. Se usa Google Drive: los datos pueden estar desactualizados.")
+    return respaldo()
+
 
 def download_sheet_as_xlsx(sheet_id):
     """Descarga un Google Sheet publico como .xlsx."""
@@ -56,7 +111,7 @@ def build_descripciones():
     Encabezados en fila 7: [2]=Producto [3]=Descripcion (0-based openpyxl).
     """
     try:
-        f = download_sheet_as_xlsx(COTIZADOR_SHEET_ID)
+        f = descargar_excel("COTIZADOR 26-27", "ONEDRIVE_COTIZADOR_2627", lambda: download_sheet_as_xlsx(COTIZADOR_SHEET_ID))
         wb = openpyxl.load_workbook(f, read_only=True, data_only=True)
         ws = wb['COTIZADOR'] if 'COTIZADOR' in wb.sheetnames else wb[wb.sheetnames[0]]
         desc = {}
@@ -142,9 +197,9 @@ def sheet_to_rows(ws, max_col=30):
 def procesar_campana(camp, ids):
     print(f"\n=== Campana {camp} ===")
     print("Descargando VENTAS...")
-    v_file = download_from_gdrive(ids["ventas"])
+    v_file = descargar_excel(f"VENTAS {camp}", f"ONEDRIVE_VENTAS_{camp}", lambda: download_from_gdrive(ids["ventas"]))
     print("Descargando COMPRAS...")
-    c_file = download_from_gdrive(ids["compras"])
+    c_file = descargar_excel(f"COMPRAS {camp}", f"ONEDRIVE_COMPRAS_{camp}", lambda: download_from_gdrive(ids["compras"]))
 
     print("Leyendo VENTAS (hojas VENTAS + STOCK)...")
     wb_v = openpyxl.load_workbook(v_file, read_only=True, data_only=True)
