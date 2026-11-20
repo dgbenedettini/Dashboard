@@ -115,6 +115,11 @@ select option{background:var(--s);color:var(--t);}
 /* Modo privado: oculta margenes, ganancias y costos (toggle "Ocultar ganancias") */
 body.priv-on .priv{display:none !important;}
 body.priv-on #btnPriv{background:var(--g);color:#fff;}
+
+/* ===== PENDIENTES DE ENTREGA ===== */
+.pe-txt{color:var(--a)!important}
+.pe-tag{display:inline-block;font-size:9.5px;font-weight:700;letter-spacing:.3px;color:var(--a);border:1px solid var(--a);background:var(--al);border-radius:4px;padding:0 5px;line-height:15px;margin-left:6px;vertical-align:1px;white-space:nowrap}
+.pe-sub{font-size:10.5px;color:var(--a);white-space:nowrap;margin-top:2px;font-weight:400}
 </style>
 </head>
 <body>
@@ -432,6 +437,48 @@ function parseVentas(data,ppp){
   return rows.length?rows:null;
 }
 
+// ── PENDIENTES DE ENTREGA (solo muestra; no cambia ningún cálculo) ──
+// Ventas con ESTADO = PENDIENTE. Si la hoja STOCK ya tiene la salida (mismo cliente, producto,
+// fecha y volumen) la mercadería sigue en depósito aunque ya no figure en el stock (ej. retiro paulatino);
+// si no la tiene (lo normal) figura en el stock pero está comprometida.
+function pendInfo(rows){
+  var out={n:0,usd:0,cli:{},prod:{}};
+  var pe=(rows||[]).filter(function(r){return r.estado==='PENDIENTE';});
+  if(!pe.length)return out;
+  var sal=[];
+  try{
+    var d=window._dStk||[],hr=-1,ix={};
+    for(var i=0;i<20&&i<d.length;i++){
+      var h=d[i]||[],t={};
+      for(var j=0;j<h.length;j++){var k=norm(h[j]);if(k&&t[k]===undefined)t[k]=j;}
+      if(t.PRODUCTO!==undefined&&t.VOLUMEN!==undefined){hr=i;ix=t;break;}
+    }
+    var fc=ix['FECHA MOVIMIENTO']!==undefined?ix['FECHA MOVIMIENTO']:ix.FECHA;
+    if(hr>=0&&fc!==undefined&&ix.CLIENTE!==undefined){
+      for(var i=hr+1;i<d.length;i++){
+        var r=d[i]||[],v=n(r[ix.VOLUMEN]);
+        if(v<0)sal.push({f:pendDia(toDate(r[fc])),c:norm(r[ix.CLIENTE]),p:norm(r[ix.PRODUCTO]),v:v,u:false});
+      }
+    }
+  }catch(e){sal=[];}
+  pe.forEach(function(r){
+    var f=pendDia(r.fecha),cl=norm(r.cli),pr=norm(r.pro),desc=false;
+    for(var i=0;i<sal.length;i++){var s=sal[i];if(!s.u&&f&&s.f===f&&s.c===cl&&s.p===pr&&Math.abs(s.v+r.vol)<0.01){s.u=true;desc=true;break;}}
+    out.n++;out.usd+=r.vS;out.cli[r.cli]=(out.cli[r.cli]||0)+1;
+    var k=r.pro.toUpperCase(),o=out.prod[k]||(out.prod[k]={nd:0,d:0});
+    if(desc)o.d+=r.vol;else o.nd+=r.vol;
+  });
+  return out;
+}
+function pendDia(d){return d?d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate():'';}
+function pendStkSub(o,stock){
+  if(!o)return '';
+  var t=[];
+  if(o.nd>0)t.push(fmt(o.nd)+' comprometidas &middot; disp. '+fmt(stock-o.nd));
+  if(o.d>0)t.push('+'+fmt(o.d)+' vendidas en dep&oacute;sito');
+  return '<div class="pe-sub">'+t.join(' &middot; ')+'</div>';
+}
+
 // ── LAUNCH ───────────────────────────────────────────────────
 function launch(rows,ppp,dStk){dStk=dStk||null;window._allRows=rows;window._dStk=dStk;window._lastPPP=ppp;
   try{var _tl=document.getElementById('topLogo');if(_tl)_tl.src=window._logoHeaderData||window._logoData;var _sl=document.getElementById('startLogo');if(_sl)_sl.src=window._logoHeaderData||window._logoData;}catch(e){}
@@ -495,8 +542,9 @@ function buildDash(rows,ppp,dC){
   pag+=rows.filter(function(r){return r.st==='PARCIAL';}).reduce(function(s,r){return s+(r.pago||0);},0);
   // Pagado a proveedores (desde COMPRAS): pagadas completas + pagos parciales
   var pagProv=calcPagadoProv(window._dC||null);
+  var pend=pendInfo(rows);
   $$('kg').innerHTML=
-    '<div class="kpi"><div class="kl">Facturacion c/IVA</div><div class="kv">$'+fmt(tV)+'</div><div class="kn">'+rows.length+' lineas</div></div>'+
+    '<div class="kpi"><div class="kl">Facturacion c/IVA</div><div class="kv">$'+fmt(tV)+'</div><div class="kn">'+rows.length+' lineas</div>'+(pend.n?'<div class="kn pe-txt" style="font-size:11px">$'+fmt(pend.usd)+' pend. entrega</div>':'')+'</div>'+
     '<div class="kpi priv"><div class="kl">Margen Bruto</div><div class="kv '+(hM?'pos':'amb')+'">'+(hM?'$'+fmt(tM):'Sin compras')+'</div><div class="kn">'+(hM&&tV>0?fd(tM/tV*100)+'% sobre fact. c/IVA':'Cargar COMPRAS')+'</div></div>'+
     '<div class="kpi"><div class="kl">Clientes</div><div class="kv">'+nC+'</div><div class="kn">Cobrado $'+fmt(pag)+'</div></div>'+
     '<div class="kpi"><div class="kl">Productos</div><div class="kv">'+nP+'</div></div>'+
@@ -708,6 +756,7 @@ function tabCob(rows,tV){
 
 // ── TAB: CLIENTES ─────────────────────────────────────────────
 function tabCli(bC,rows){
+  var pendCli=pendInfo(rows).cli;
   var mx=bC[0]?bC[0].vS:1;
   var tVall=bC.reduce(function(s,r){return s+r.vS;},0);
   var rk=bC.slice(0,10).map(function(r,i){var m=r.mg!==null&&r.vS>0?r.mg/r.vS:null;var pct=tVall>0?r.vS/tVall*100:0;return '<div class="ri"><span class="rn">'+(i+1)+'</span><div class="rw"><div class="rl2"><span class="rnm">'+(r.key.length>28?r.key.slice(0,26)+'...':r.key)+'</span><span class="rvl">$'+fmt(r.vS)+'<span style="font-size:10px;color:var(--t3);margin-left:6px;">'+fd(pct)+'%</span></span></div><div class="rb"><div class="rf" style="width:'+(r.vS/mx*100).toFixed(1)+'%;background:'+C[i%13]+'"></div></div></div><span class="rp priv '+(m!==null?(m>=.1?'pos':m>=.05?'amb':'neg'):'amb')+'">'+(m!==null?fd(m*100)+'%':'N/D')+'</span></div>';}).join('');
@@ -718,7 +767,7 @@ function tabCli(bC,rows){
     '<div class="card"><div class="ct">Productos por cliente</div><div class="fr"><label>Cliente:</label><select id="sCP">'+co+'</select></div><div id="cpL"></div></div></div>'+
     '<div class="card"><div class="ct">Detalle por cliente</div><div class="tw2"><table>'+
     '<thead><tr><th>#</th><th>Cliente</th><th class="r">Facturacion c/IVA</th><th class="r">Volumen</th><th class="r priv">Margen $</th><th class="r priv">% MB</th><th class="r">Prods</th></tr></thead>'+
-    '<tbody>'+bC.map(function(r,i){var m=r.mg!==null&&r.vS>0?r.mg/r.vS:null;return'<tr><td>'+(i+1)+'</td><td>'+r.key+'</td><td class="r">$'+fmt(r.vS)+'</td><td class="r">'+fmt(r.vol)+'</td><td class="r priv">'+(r.mg!==null?'$'+fmt(r.mg):'-')+'</td><td class="r priv">'+mbadge(m)+'</td><td class="r">'+r.prods+'</td></tr>';}).join('')+'</tbody></table></div></div>';
+    '<tbody>'+bC.map(function(r,i){var m=r.mg!==null&&r.vS>0?r.mg/r.vS:null;var nPe=pendCli[r.key]||0;return'<tr><td>'+(i+1)+'</td><td>'+r.key+(nPe?' <span class="pe-tag">'+nPe+' PEND. ENTREGA</span>':'')+'</td><td class="r">$'+fmt(r.vS)+'</td><td class="r">'+fmt(r.vol)+'</td><td class="r priv">'+(r.mg!==null?'$'+fmt(r.mg):'-')+'</td><td class="r priv">'+mbadge(m)+'</td><td class="r">'+r.prods+'</td></tr>';}).join('')+'</tbody></table></div></div>';
   function rCP(cli){var ps=Object.entries(ppc[cli]||{}).sort(function(a,b){return b[1]-a[1];}).slice(0,15);var mx2=ps[0]?ps[0][1]:1;$$('cpL').innerHTML=ps.map(function(e,i){return'<div class="ri"><span class="rn">'+(i+1)+'</span><div class="rw"><div class="rl2"><span class="rnm">'+e[0]+'</span><span class="rvl">$'+fmt(e[1])+'</span></div><div class="rb"><div class="rf" style="width:'+(e[1]/mx2*100).toFixed(1)+'%;background:'+C[i%13]+'"></div></div></div></div>';}).join('');}
   $$('sCP').addEventListener('change',function(e){rCP(e.target.value);});
   if(bC[0])rCP(bC[0].key);
@@ -1088,6 +1137,7 @@ function tabStk(rows,ppp,dStk){
 
   // ── STOCK REAL desde la pestana STOCK (Opcion A) ──
   var stockReal=buildStockReal(dStk);
+  var pendP=pendInfo(rows).prod;
   var usandoStockReal=!!stockReal;
   var stockItems=[];
   var hayDescuadre=false;
@@ -1161,7 +1211,7 @@ function tabStk(rows,ppp,dStk){
       '<div class="card" style="margin-bottom:14px;"><div class="ct">Detalle stock por producto</div>'+
         '<div style="margin-bottom:10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center;"><input id="stkSearch" type="text" placeholder="Buscar por producto o ingrediente activo..." oninput="filtrarStk()" style="flex:1;min-width:220px;max-width:420px;font-size:13px;padding:8px 12px;border:1px solid var(--bd2);border-radius:8px;font-family:DM Sans,sans-serif;"><select id="stkProvSel" onchange="filtrarStk()" style="font-size:13px;padding:8px 12px;border:1px solid var(--bd2);border-radius:8px;font-family:DM Sans,sans-serif;background:var(--s);cursor:pointer;"><option value="">Todos los proveedores</option>'+provOpts+'</select><span id="stkSub" style="font-size:12px;color:var(--t2);"></span></div>'+
         '<div class="tw2"><table id="stkTable"><thead><tr><th>#</th><th>Producto</th><th>Ingrediente activo</th><th class="r">Comprado</th><th class="r">Vendido</th><th class="r">Stock</th><th class="r priv">PPP c/IVA</th><th class="r priv">Valor USD</th><th class="r priv">% total</th></tr></thead>'+
-        '<tbody>'+stockItems.map(function(s,i){var pct=totalUSD>0&&s.usd?s.usd/totalUSD*100:0;var dsc=getDesc(s.pro);var mk=s.desc?'<span title="El stock real difiere de Comprado - Vendido (remanentes o ventas de otra campana)" style="color:var(--a);font-weight:700;cursor:help;">&nbsp;*</span>':'';var prov=(window._stkProv&&window._stkProv[s.pro.toUpperCase()])||'';return'<tr data-search="'+(s.pro+' '+dsc).toUpperCase().replace(/"/g,'')+'" data-prov="'+prov.replace(/"/g,'')+'" data-usd="'+(s.usd||0)+'"><td>'+(i+1)+'</td><td>'+s.pro+'</td><td style="font-size:11px;color:var(--t2);">'+dsc+'</td><td class="r">'+fmt(s.bought)+'</td><td class="r">'+fmt(s.sold)+'</td><td class="r"><strong>'+fmt(s.stock)+'</strong>'+mk+'</td><td class="r priv">'+(s.pppC?'$'+s.pppC.toFixed(2):'-')+'</td><td class="r priv">'+(s.usd?'$'+fmt(s.usd):'-')+'</td><td class="r priv">'+fd(pct)+'%</td></tr>';}).join('')+
+        '<tbody>'+stockItems.map(function(s,i){var pct=totalUSD>0&&s.usd?s.usd/totalUSD*100:0;var dsc=getDesc(s.pro);var mk=s.desc?'<span title="El stock real difiere de Comprado - Vendido (remanentes o ventas de otra campana)" style="color:var(--a);font-weight:700;cursor:help;">&nbsp;*</span>':'';var prov=(window._stkProv&&window._stkProv[s.pro.toUpperCase()])||'';return'<tr data-search="'+(s.pro+' '+dsc).toUpperCase().replace(/"/g,'')+'" data-prov="'+prov.replace(/"/g,'')+'" data-usd="'+(s.usd||0)+'"><td>'+(i+1)+'</td><td>'+s.pro+'</td><td style="font-size:11px;color:var(--t2);">'+dsc+'</td><td class="r">'+fmt(s.bought)+'</td><td class="r">'+fmt(s.sold)+'</td><td class="r"><strong>'+fmt(s.stock)+'</strong>'+mk+pendStkSub(pendP[s.pro.toUpperCase()],s.stock)+'</td><td class="r priv">'+(s.pppC?'$'+s.pppC.toFixed(2):'-')+'</td><td class="r priv">'+(s.usd?'$'+fmt(s.usd):'-')+'</td><td class="r priv">'+fd(pct)+'%</td></tr>';}).join('')+
         '</tbody></table></div>'+
         (hayDescuadre?'<div style="font-size:11px;color:var(--t3);margin-top:8px;padding:8px 10px;background:var(--al);border-radius:6px;"><span style="color:var(--a);font-weight:700;">*</span> El stock real proviene de la planilla STOCK y contempla remanentes de campanas anteriores y ventas registradas fuera de esta campana. Por eso puede no coincidir con Comprado &minus; Vendido.</div>':'')+
       '</div>'
